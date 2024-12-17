@@ -1,4 +1,5 @@
 import asyncio
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -21,7 +22,7 @@ from .chunking import (
     LangChainCharacterTextSplitter,
     LangChainRecursiveCharacterTextSplitter,
 )
-from .embeddings import ChunkEmbeddingError, OpenAI
+from .embeddings import ChunkEmbeddingError, Ollama, OpenAI, VoyageAI
 from .formatting import ChunkValue, PythonTemplate
 from .processing import ProcessingDefault
 
@@ -73,7 +74,7 @@ class Config:
     """
 
     version: str
-    embedding: OpenAI
+    embedding: OpenAI | Ollama | VoyageAI
     processing: ProcessingDefault
     chunking: (
         LangChainCharacterTextSplitter | LangChainRecursiveCharacterTextSplitter
@@ -461,6 +462,7 @@ class Worker:
 
         async with await psycopg.AsyncConnection.connect(self.db_url) as conn:
             await register_vector_async(conn)
+            await self.vectorizer.config.embedding.setup()
             while True:
                 if not self._continue_processing(loops, res):
                     return res
@@ -747,3 +749,8 @@ class Worker:
                 }
             ),
         )
+
+
+TIKTOKEN_CACHE_DIR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "tiktoken_cache"
+)

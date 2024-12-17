@@ -3,9 +3,11 @@ import datetime
 import logging
 import os
 import random
+import signal
 import sys
 import time
 from collections.abc import Sequence
+from typing import Any
 
 import click
 import psycopg
@@ -22,6 +24,14 @@ load_dotenv()
 
 structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
 log = structlog.get_logger()
+
+
+class VectorizerNotFoundError(Exception):
+    pass
+
+
+class ApiKeyNotFoundError(Exception):
+    pass
 
 
 def asbool(value: str | None):
@@ -52,25 +62,29 @@ def get_pgai_version(cur: psycopg.Cursor) -> str | None:
 
 
 def get_vectorizer_ids(
-    cur: psycopg.Cursor, vectorizer_ids: Sequence[int] | None = None
+    db_url: str, vectorizer_ids: Sequence[int] | None = None
 ) -> list[int]:
-    valid_vectorizer_ids: list[int] = []
-    if vectorizer_ids is None or len(vectorizer_ids) == 0:
-        cur.execute("select id from ai.vectorizer")
-    else:
-        cur.execute(
-            "select id from ai.vectorizer where id = any(%s)",
-            [
-                list(vectorizer_ids),
-            ],
-        )
-    for row in cur.fetchall():
-        valid_vectorizer_ids.append(row[0])
-    random.shuffle(valid_vectorizer_ids)
-    return valid_vectorizer_ids
+    with (
+        psycopg.Connection.connect(db_url) as con,
+        con.cursor(row_factory=namedtuple_row) as cur,
+    ):
+        valid_vectorizer_ids: list[int] = []
+        if vectorizer_ids is None or len(vectorizer_ids) == 0:
+            cur.execute("select id from ai.vectorizer")
+        else:
+            cur.execute(
+                "select id from ai.vectorizer where id = any(%s)",
+                [
+                    list(vectorizer_ids),
+                ],
+            )
+        for row in cur.fetchall():
+            valid_vectorizer_ids.append(row[0])
+        random.shuffle(valid_vectorizer_ids)
+        return valid_vectorizer_ids
 
 
-def get_vectorizer(db_url: str, vectorizer_id: int) -> Vectorizer | None:
+def get_vectorizer(db_url: str, vectorizer_id: int) -> Vectorizer:
     with (
         psycopg.Connection.connect(db_url) as con,
         con.cursor(row_factory=dict_row) as cur,
@@ -81,22 +95,27 @@ def get_vectorizer(db_url: str, vectorizer_id: int) -> Vectorizer | None:
         )
         row = cur.fetchone()
         if row is None:
-            log.warning("vectorizer not found", vectorizer_id=vectorizer_id)
-            return None
+            raise VectorizerNotFoundError(f"vectorizer_id={vectorizer_id}")
         vectorizer = row["vectorizer"]
         embedding = vectorizer["config"]["embedding"]
-        api_key_name = embedding["api_key_name"]
-        api_key = os.getenv(api_key_name, None)
-        if api_key is None:
-            log.error(
-                "API key not found",
-                api_key_name=api_key_name,
-                vectorizer_id=vectorizer_id,
-            )
-            return None
-        secrets: dict[str, str | None] = {api_key_name: api_key}
         vectorizer = Vectorizer(**vectorizer)
-        vectorizer.config.embedding.set_api_key(secrets)
+        # The Ollama API doesn't need a key, so `api_key_name` may be unset
+        if "api_key_name" in embedding:
+            api_key_name = embedding["api_key_name"]
+            api_key = os.getenv(api_key_name, None)
+            if api_key is None:
+                raise ApiKeyNotFoundError(
+                    f"api_key_name={api_key_name} vectorizer_id={vectorizer_id}"
+                )
+            secrets: dict[str, str | None] = {api_key_name: api_key}
+            # The Ollama API doesn't need a key, so doesn't support `set_api_key`
+            set_api_key = getattr(vectorizer.config.embedding, "set_api_key", None)
+            if callable(set_api_key):
+                set_api_key(secrets)
+            else:
+                log.error(
+                    f"cannot set secret value '{api_key_name}' for vectorizer with id: '{vectorizer.id}'"  # noqa
+                )
         return vectorizer
 
 
@@ -149,6 +168,12 @@ def get_log_level(level: str) -> int:
     return logging.getLevelName("INFO")  # type: ignore
 
 
+def shutdown_handler(signum: int, _frame: Any):
+    signame = signal.Signals(signum).name
+    log.info(f"received {signame}, exiting")
+    exit(0)
+
+
 @click.command(name="worker")
 @click.version_option(version=__version__)
 @click.option(
@@ -166,7 +191,7 @@ def get_log_level(level: str) -> int:
     type=click.INT,
     multiple=True,
     help="Only fetch work from the given vectorizer ids. If not provided, all vectorizers will be fetched.",  # noqa
-    default=None,
+    default=[],
 )
 @click.option(
     "-c",
@@ -195,42 +220,97 @@ def get_log_level(level: str) -> int:
     is_flag=True,
     default=False,
     show_default=True,
-    help="Exit after processing all available work.",
+    help="Exit after processing all available work (implies --exit-on-error).",
+)
+@click.option(
+    "--exit-on-error",
+    type=click.BOOL,
+    default=None,
+    show_default=True,
+    help="Exit immediately when an error occurs.",
 )
 def vectorizer_worker(
     db_url: str,
-    vectorizer_ids: Sequence[int] | None,
+    vectorizer_ids: Sequence[int],
     concurrency: int,
     log_level: str,
     poll_interval: int,
     once: bool,
+    exit_on_error: bool | None,
 ) -> None:
+    # gracefully handle being asked to shut down
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+
     structlog.configure(
         wrapper_class=structlog.make_filtering_bound_logger(get_log_level(log_level))
     )
     log.debug("starting vectorizer worker")
     poll_interval_str = datetime.timedelta(seconds=poll_interval)
 
-    with (
-        psycopg.Connection.connect(db_url) as con,
-        con.cursor(row_factory=namedtuple_row) as cur,
-    ):
-        pgai_version = get_pgai_version(cur)
-        if pgai_version is None:
-            log.critical("the pgai extension is not installed")
-            sys.exit(1)
-        vectorizer_ids = get_vectorizer_ids(cur, vectorizer_ids)
-    if len(vectorizer_ids) == 0:
-        log.warning("no vectorizers found")
-        return
+    dynamic_mode = len(vectorizer_ids) == 0
+    valid_vectorizer_ids = []
+
+    can_connect = False
+    pgai_version = None
+    if once and exit_on_error is None:
+        # --once implies --exit-on-error
+        exit_on_error = True
 
     while True:
-        for vectorizer_id in vectorizer_ids:
-            vectorizer = get_vectorizer(db_url, vectorizer_id)
-            if vectorizer is None:
-                continue
-            log.info("running vectorizer", vectorizer_id=vectorizer_id)
-            run_vectorizer(db_url, vectorizer, concurrency)
+        try:
+            if not can_connect or pgai_version is None:
+                with (
+                    psycopg.Connection.connect(db_url) as con,
+                    con.cursor(row_factory=namedtuple_row) as cur,
+                ):
+                    pgai_version = get_pgai_version(cur)
+                    can_connect = True
+                    if pgai_version is None:
+                        log.error("the pgai extension is not installed")
+                        if exit_on_error:
+                            sys.exit(1)
+
+            if can_connect and pgai_version is not None:
+                if not dynamic_mode and len(valid_vectorizer_ids) != len(
+                    vectorizer_ids
+                ):
+                    valid_vectorizer_ids = get_vectorizer_ids(db_url, vectorizer_ids)
+                    if len(valid_vectorizer_ids) != len(vectorizer_ids):
+                        log.error(
+                            f"invalid vectorizers, wanted: {list(vectorizer_ids)}, got: {valid_vectorizer_ids}"  # noqa: E501 (line too long)
+                        )
+                        if exit_on_error:
+                            sys.exit(1)
+                else:
+                    valid_vectorizer_ids = get_vectorizer_ids(db_url, vectorizer_ids)
+                    if len(valid_vectorizer_ids) == 0:
+                        log.warning("no vectorizers found")
+
+                for vectorizer_id in valid_vectorizer_ids:
+                    try:
+                        vectorizer = get_vectorizer(db_url, vectorizer_id)
+                        log.info("running vectorizer", vectorizer_id=vectorizer_id)
+                        run_vectorizer(db_url, vectorizer, concurrency)
+                    except (VectorizerNotFoundError, ApiKeyNotFoundError) as e:
+                        log.error(
+                            f"error getting vectorizer: {type(e).__name__}: {str(e)} "
+                        )
+                        if exit_on_error:
+                            sys.exit(1)
+        except psycopg.OperationalError as e:
+            if "connection failed" in str(e):
+                log.error(f"unable to connect to database: {str(e)}")
+            else:
+                log.error(f"unexpected error: {str(e)}")
+            if exit_on_error:
+                sys.exit(1)
+        except Exception as e:
+            # catch any exceptions, log them, and keep on going
+            log.error(f"unexpected error: {str(e)}")
+            if exit_on_error:
+                sys.exit(1)
+
         if once:
             return
         log.info(f"sleeping for {poll_interval_str} before polling for new work")

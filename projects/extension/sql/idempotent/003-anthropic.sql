@@ -6,6 +6,7 @@ create or replace function ai.anthropic_generate
 , messages jsonb
 , max_tokens int default 1024
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 , timeout float8 default null
 , max_retries int default null
@@ -21,7 +22,9 @@ create or replace function ai.anthropic_generate
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.anthropic
-    client = ai.anthropic.make_client(plpy, api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries)
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.anthropic.DEFAULT_KEY_NAME, SD)
+    client = ai.anthropic.make_client(api_key=api_key_resolved, base_url=base_url, timeout=timeout, max_retries=max_retries)
 
     import json
     messages_1 = json.loads(messages)
@@ -36,9 +39,9 @@ as $python$
     if temperature is not None:
         args["temperature"] = temperature
     if tool_choice is not None:
-        args["tool_choice"] = json.dumps(tool_choice)
+        args["tool_choice"] = json.loads(tool_choice)
     if tools is not None:
-        args["tools"] = json.dumps(tools)
+        args["tools"] = json.loads(tools)
     if top_k is not None:
         args["top_k"] = top_k
     if top_p is not None:

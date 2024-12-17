@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1.3-labs
-ARG PG_MAJOR
-ARG TIMESCALEDB_IMAGE=timescale/timescaledb-ha:pg${PG_MAJOR}
-FROM ${TIMESCALEDB_IMAGE} as timescaledb
+ARG PG_MAJOR=17
+ARG PGVECTORSCALE_VERSION=0.5.1
 
-ARG PG_MAJOR
-FROM postgres:${PG_MAJOR}
-
-ENV WHERE_AM_I=docker
+###############################################################################
+# base image
+FROM postgres:${PG_MAJOR} as base
+ARG PGVECTORSCALE_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 USER root
 
@@ -19,31 +18,58 @@ RUN set -e; \
     postgresql-${PG_MAJOR}-pgextwlist \
     postgresql-server-dev-${PG_MAJOR} \
     python3-pip \
-    make \
     git \
     curl \
-    vim
+    vim \
+    && curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin/
 
-# install timescaledb and pgvectorscale
-COPY --from=timescaledb /usr/share/postgresql/${PG_MAJOR}/extension/timescaledb--*.sql /usr/share/postgresql/${PG_MAJOR}/extension/
-COPY --from=timescaledb /usr/share/postgresql/${PG_MAJOR}/extension/vectorscale--*.sql /usr/share/postgresql/${PG_MAJOR}/extension/
-COPY --from=timescaledb /usr/share/postgresql/${PG_MAJOR}/extension/timescaledb.control /usr/share/postgresql/${PG_MAJOR}/extension/
-COPY --from=timescaledb /usr/share/postgresql/${PG_MAJOR}/extension/vectorscale.control /usr/share/postgresql/${PG_MAJOR}/extension/
-COPY --from=timescaledb /usr/lib/postgresql/${PG_MAJOR}/lib/timescaledb.so /usr/lib/postgresql/${PG_MAJOR}/lib/
-COPY --from=timescaledb /usr/lib/postgresql/${PG_MAJOR}/lib/timescaledb-*.so /usr/lib/postgresql/${PG_MAJOR}/lib/
-COPY --from=timescaledb /usr/lib/postgresql/${PG_MAJOR}/lib/vectorscale-*.so /usr/lib/postgresql/${PG_MAJOR}/lib/
+# install timescaledb
+RUN set -e; \
+    apt-get install -y gnupg postgresql-common apt-transport-https lsb-release wget; \
+    /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y; \
+    echo "deb https://packagecloud.io/timescale/timescaledb/debian/ $(lsb_release -c -s) main" | tee /etc/apt/sources.list.d/timescaledb.list; \
+    wget --quiet -O - https://packagecloud.io/timescale/timescaledb/gpgkey | gpg --dearmor -o /etc/apt/trusted.gpg.d/timescaledb.gpg; \
+    apt-get update -y; \
+    apt-get install -y timescaledb-2-postgresql-${PG_MAJOR}
+
+# install pgvectorscale
+RUN set -e; \
+    apt-get install -y unzip; \
+    TARGET_ARCH=$(if [ "$(uname -m)" = "x86_64" ]; then echo "amd64"; elif [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; fi); \
+    wget https://github.com/timescale/pgvectorscale/releases/download/${PGVECTORSCALE_VERSION}/pgvectorscale-${PGVECTORSCALE_VERSION}-pg${PG_MAJOR}-"$TARGET_ARCH".zip; \
+    unzip pgvectorscale-${PGVECTORSCALE_VERSION}-pg${PG_MAJOR}-"$TARGET_ARCH".zip; \
+    dpkg -i pgvectorscale-postgresql-${PG_MAJOR}_${PGVECTORSCALE_VERSION}-Linux_"$TARGET_ARCH".deb; \
+    rm pgvectorscale-${PGVECTORSCALE_VERSION}-pg${PG_MAJOR}-"$TARGET_ARCH".zip pgvectorscale-postgresql-${PG_MAJOR}_${PGVECTORSCALE_VERSION}-Linux_"$TARGET_ARCH".deb
+
+
+###############################################################################
+# image for use in testing the pgai library
+FROM base AS pgai-test-db
+ENV PG_MAJOR=${PG_MAJOR}
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+RUN pip install uv==0.5.9
+WORKDIR /pgai
+COPY . .
+RUN just build install
+
+
+###############################################################################
+# image for use in extension development
+FROM base
+ENV WHERE_AM_I=docker
+USER root
+
+RUN pip install --break-system-packages uv==0.5.9
 
 # install pgspot
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN set -eux; \
     git clone https://github.com/timescale/pgspot.git /build/pgspot; \
-    pip install /build/pgspot; \
+    uv pip install --system --break-system-packages /build/pgspot; \
     rm -rf /build/pgspot
 
 # install our test python dependencies
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
 COPY requirements-test.txt /build/requirements-test.txt
-RUN pip install -r /build/requirements-test.txt
+RUN uv pip install --system --break-system-packages -r /build/requirements-test.txt
 RUN rm -r /build
 
 WORKDIR /pgai

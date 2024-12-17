@@ -1,7 +1,7 @@
 
 # pgai Vectorizer API reference
 
-This page is provides an API reference for Vectorizer functions. For an overview
+This page provides an API reference for Vectorizer functions. For an overview
 of Vectorizer and how it works, see the [Vectorizer Guide](./vectorizer.md).
 
 A vectorizer provides you with a powerful and automated way to generate and 
@@ -25,7 +25,7 @@ operations such as INSERT, UPDATE, and DELETE.
 
 - **Configurable embedding process**: a vectorizer is highly configurable, 
    allowing you to specify:
-    - The embedding model and dimensions. For example, OpenAI's `text-embedding-3-small`.
+    - The embedding model and dimensions. For example, the `nomic-embed-text` model in Ollama.
     - Chunking strategies for text data.
     - Formatting templates for combining multiple fields.
     - Indexing options for efficient similarity searches.
@@ -103,7 +103,7 @@ create and manage all the necessary database objects and processes. For example:
 ```sql
 SELECT ai.create_vectorizer(
     'website.blog'::regclass,
-    embedding => ai.embedding_openai('text-embedding-3-small', 768),
+    embedding => ai.embedding_ollama('nomic-embed-text', 768),
     chunking => ai.chunking_character_text_splitter('body', 128, 10),
     formatting => ai.formatting_python_template('title: $title published: $published $chunk'),
     grant_to => ai.grant_to('bob', 'alice')
@@ -112,7 +112,7 @@ SELECT ai.create_vectorizer(
 
 This function call:
 1. Sets up a vectorizer for the `website.blog` table.
-2. Uses OpenAI's `text-embedding-3-small` model to create 768 dimensional embeddings.
+2. Uses the Ollama `nomic-embed-text` model to create 768 dimensional embeddings.
 3. Chunks the `body` column into 128-character pieces with a 10-character overlap.
 4. Formats each chunk with a `title` and a `published` date.
 5. Grants necessary permissions to the roles `bob` and `alice`.
@@ -128,7 +128,7 @@ in other management functions.
 |------------------|--------------------------------------------------------|-----------------------------------|----------|----------------------------------------------------------------------------------------------------|
 | source           | regclass                                               | -                                 | ✔        | The source table that embeddings are generated for.                                                |
 | destination      | name                                                   | -                                 | ✖        | A name for the table the embeddings are stored in.                                                 |
-| embedding        | [Embedding configuration](#embedding-configuration)    | -                                 | ✔        | Set the embedding process using `ai.embedding_openai()` to specify the model and dimensions.       |
+| embedding        | [Embedding configuration](#embedding-configuration)    | -                                 | ✔        | Set how to embed the data.                                                                         |
 | chunking         | [Chunking configuration](#chunking-configuration)      | -                                 | ✔        | Set the way to split text data, using functions like `ai.chunking_character_text_splitter()`.      |
 | indexing         | [Indexing configuration](#indexing-configuration)      | `ai.indexing_default()`           | ✖        | Specify how to index the embeddings. For example, `ai.indexing_diskann()` or `ai.indexing_hnsw()`. |
 | formatting       | [Formatting configuration](#formatting-configuration)  | `ai.formatting_python_template()` | ✖        | Define the data format before embedding, using `ai.formatting_python_template()`.                  |
@@ -232,13 +232,13 @@ You use it to recursively split text into chunks using multiple separators.
 
 `ai.chunking_recursive_character_text_splitter` takes the following parameters:
 
-|Name| Type | Default | Required | Description                                              |
-|-|------|---------|-|----------------------------------------------------------|
-|chunk_column| name | -       |✔| The name of the column containing the text to be chunked |
-|chunk_size| int  | 800     |✖| The maximum number of characters per chunk               |
-|chunk_overlap| int  | 400     |✖| The number of characters to overlap between chunks       |
-|separator| text[] | array[E'\n\n', E'\n', '.', '?', '!', ' ', ''] |✖| The string or character used to split the text |
-|is_separator_regex| bool | false   |✖| Set to `true` if `separator` is a regular expression. |
+| Name               | Type | Default | Required | Description                                              |
+|--------------------|------|---------|-|----------------------------------------------------------|
+| chunk_column       | name | -       |✔| The name of the column containing the text to be chunked |
+| chunk_size         | int  | 800     |✖| The maximum number of characters per chunk               |
+| chunk_overlap      | int  | 400     |✖| The number of characters to overlap between chunks       |
+| separators         | text[] | array[E'\n\n', E'\n', '.', '?', '!', ' ', ''] |✖| The string or character used to split the text |
+| is_separator_regex | bool | false   |✖| Set to `true` if `separator` is a regular expression. |
 
 #### Returns
 
@@ -246,42 +246,143 @@ A JSON configuration object that you can use in [ai.create_vectorizer](#create-v
 
 ## Embedding configuration
 
-You use the `ai.embedding_openai` function to specify the OpenAI model and 
-embedding options used when generating embeddings.
+You use the embedding configuration functions to specify how embeddings are
+generated for your data.
+
+The embedding functions are:
+
+- [ai.embedding_openai](#aiembedding_openai)
+- [ai.embedding_ollama](#aiembedding_ollama)
+- [ai.embedding_voyageai](#aiembedding_voyageai)
+
+### ai.embedding_openai
+
+You call the `ai.embedding_openai` function to use an OpenAI model to generate embeddings.
 
 The purpose of `ai.embedding_openai` is to:
 - Define which OpenAI embedding model to use.
 - Specify the dimensionality of the embeddings.
 - Configure optional parameters like the user identifier for API calls.
-- Set the name of the environment variable that contains the OpenAI API key.
+- Set the name of the [environment variable that holds the value of your OpenAI API key][openai-use-env-var].  
 
-### Example usage
+#### Example usage
 
-This function is usually used to create an embedding configuration object that is passed as an argument to [ai.create_vectorizer](#create-vectorizers):
+Use `ai.embedding_openai` to create an embedding configuration object that is passed as an argument to [ai.create_vectorizer](#create-vectorizers):
+
+1. Set the value of your OpenAI API key.
+
+   For example, [in an environment variable][openai-set-key] or in a [Docker configuration][docker configuration].
+   
+2. Create a vectorizer with OpenAI as the embedding provider: 
+
+    ```sql
+    SELECT ai.create_vectorizer(
+        'my_table'::regclass,
+        embedding => ai.embedding_openai(
+          'text-embedding-3-small', 
+          768, 
+          chat_user => 'bob',
+          api_key_name => 'MY_OPENAI_API_KEY_NAME'
+        ),
+        -- other parameters...
+    );
+    ```
+
+#### Parameters
+
+The function takes several parameters to customize the OpenAI embedding configuration:
+
+| Name         | Type | Default          | Required | Description                                                                                                                                                                                                                                                                               |
+|--------------|------|------------------|----------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| model        | text | -                | ✔        | Specify the name of the OpenAI embedding model to use. For example, `text-embedding-3-small`.                                                                                                                                                                                             |
+| dimensions   | int  | -                | ✔        | Define the number of dimensions for the embedding vectors. This should match the output dimensions of the chosen model.                                                                                                                                                                   |
+| chat_user    | text | -                | ✖        | The identifier for the user making the API call. This can be useful for tracking API usage or for OpenAI's monitoring purposes.                                                                                                                                                           |
+| api_key_name | text | `OPENAI_API_KEY` | ✖        | Set [the name of the environment variable that contains the OpenAI API key][openai-use-env-var]. This allows for flexible API key management without hardcoding keys in the database. On Timescale Cloud, you should set this to the name of the secret that contains the OpenAI API key. |
+#### Returns
+
+A JSON configuration object that you can use in [ai.create_vectorizer](#create-vectorizers).
+
+### ai.embedding_ollama
+
+You use the `ai.embedding_ollama` function to use an Ollama model to generate embeddings.
+
+The purpose of `ai.embedding_ollama` is to:
+- Define which Ollama model to use.
+- Specify the dimensionality of the embeddings.
+- Configure how the Ollama API is accessed.
+- Configure the model's truncation behaviour, and keep alive.
+- Configure optional, model-specific parameters, like the `temperature`.
+
+#### Example usage
+
+This function is used to create an embedding configuration object that is passed as an argument to [ai.create_vectorizer](#create-vectorizers):
 
 ```sql
 SELECT ai.create_vectorizer(
     'my_table'::regclass,
-    embedding => ai.embedding_openai(
-      'text-embedding-3-small', 
-      768, 
-      chat_user => 'bob',
-      api_key_name => 'MY_OPENAI_API_KEY_NAME'
+    embedding => ai.embedding_ollama(
+      'nomic-embed-text',
+      768,
+      base_url => "http://my.ollama.server:443"
+      options => '{ "num_ctx": 1024 }',
+      keep_alive => "10m"
     ),
     -- other parameters...
 );
 ```
 
-### Parameters
+#### Parameters
 
-The function takes several parameters to customize the OpenAI embedding configuration:
+The function takes several parameters to customize the Ollama embedding configuration:
 
-|Name| Type | Default | Required | Description                                                                                                                                                    |
-|-|------|-|-|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-|model| text | -|✔| Specify the name of the OpenAI embedding model to use. For example, `text-embedding-3-small`.                                                                   |
-|dimensions| int  | -|✔| Define the number of dimensions for the embedding vectors. This should match the output dimensions of the chosen model.                                        |
-|chat_user| text | -|✖| The identifier for the user making the API call. This can be useful for tracking API usage or for OpenAI's monitoring purposes.                                |
-|api_key_name|  text    | `OPENAI_API_KEY`|✖| Set the name of the environment variable that contains the OpenAI API key. This allows for flexible API key management without hardcoding keys in the database. On Timescale Cloud, you should set this to the name of the secret that contains the OpenAI API key. |
+| Name       | Type    | Default | Required | Description                                                                                                                                                              |
+|------------|---------|---------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| model      | text    | -       | ✔        | Specify the name of the Ollama model to use. For example, `nomic-embed-text`. Note: the model must already be available (pulled) in your Ollama server.                  |
+| dimensions | int     | -       | ✔        | Define the number of dimensions for the embedding vectors. This should match the output dimensions of the chosen model.                                                  |
+| base_url   | text    | -       | ✖        | Set the base_url of the Ollama API. Note: no default configured here to allow configuration of the vectorizer worker through `OLLAMA_HOST` env var.                      |
+| options    | jsonb   | -       | ✖        | Configures additional model parameters listed in the documentation for the Modelfile, such as `temperature`, or `num_ctx`.                                               |
+| keep_alive | text    | -       | ✖        | Controls how long the model will stay loaded in memory following the request. Note: no default configured here to allow configuration at Ollama-level.                   |
+
+#### Returns
+
+A JSON configuration object that you can use in [ai.create_vectorizer](#create-vectorizers).
+
+### ai.embedding_voyageai
+
+You use the `ai.embedding_voyageai` function to use a Voyage AI model to generate embeddings.
+
+The purpose of `ai.embedding_voyageai` is to:
+- Define which Voyage AI model to use.
+- Specify the dimensionality of the embeddings.
+- Configure the model's truncation behaviour, and api key name.
+- Configure the input type.
+
+#### Example usage
+
+This function is used to create an embedding configuration object that is passed as an argument to [ai.create_vectorizer](#create-vectorizers):
+
+```sql
+SELECT ai.create_vectorizer(
+    'my_table'::regclass,
+    embedding => ai.embedding_voyageai(
+      'voyage-3-lite',
+      512,
+      api_key_name => "TEST_API_KEY"
+    ),
+    -- other parameters...
+);
+```
+
+#### Parameters
+
+The function takes several parameters to customize the Voyage AI embedding configuration:
+
+| Name         | Type    | Default          | Required | Description                                                                                                                                                                                                                                                               |
+|--------------|---------|------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| model        | text    | -                | ✔        | Specify the name of the [Voyage AI model](https://docs.voyageai.com/docs/embeddings#model-choices) to use.                                                                                                                                                                |
+| dimensions   | int     | -                | ✔        | Define the number of dimensions for the embedding vectors. This should match the output dimensions of the chosen model.                                                                                                                                                   |
+| input_type   | text    | 'document'       | ✖        | Type of the input text, null, 'query', or 'document'.                                                                                                                                                                                                                     |
+| api_key_name | text    | `VOYAGE_API_KEY` | ✖        | Set the name of the environment variable that contains the Voyage AI API key. This allows for flexible API key management without hardcoding keys in the database. On Timescale Cloud, you should set this to the name of the secret that contains the Voyage AI API key. |
 
 #### Returns
 
@@ -858,10 +959,13 @@ You use `ai.drop_vectorizer` to:
 - Drops the queue table used to manage the updates to be processed.
 - Deletes the vectorizer row from the `ai.vectorizer` table.
 
-`ai.drop_vectorizer` does not:
+By default, `ai.drop_vectorizer` does not:
 
 - Drop the target table containing the embeddings.
 - Drop the view joining the target and source tables.
+
+There is an optional parameter named `drop_all` which is `false` by default. If you
+explicitly pass `true`, the function WILL drop the target table and view.
 
 This design allows you to keep the generated embeddings and the convenient view
 even after dropping the vectorizer. This is useful if you want to stop
@@ -878,35 +982,18 @@ Best practices are:
 
 
 Examples: 
-- Remove the vectorizer with ID 1 and clean up its associated resources:
+- Remove the vectorizer with ID 1:
 
   ```sql
   -- Assuming we have a vectorizer with ID 1
   SELECT ai.drop_vectorizer(1);
   ```
 
-- Vectorizer reconfiguration: when you want to significantly change the configuration of a vectorizer, it's often easier to drop the old one and create a new one.
+- Remove the vectorizer with ID 1 and drop the target table and view as well:
 
   ```sql
-  -- Drop the old vectorizer
-  SELECT ai.drop_vectorizer(old_vectorizer_id);
- 
-  -- Drop the data
-  DROP VIEW my_table_embedding;
-  DROP TABLE my_table_embedding_store;
-  
-  -- Create a new vectorizer with different configuration
-  SELECT ai.create_vectorizer(
-      'my_table'::regclass,
-      embedding => ai.embedding_openai('text-embedding-3-large', 1536),  -- Using a different model
-      chunking => ai.chunking_character_text_splitter('content', 256, 20),  -- Different chunking
-      -- other parameters...
-  );
+  SELECT ai.drop_vectorizer(1, drop_all=>true);
   ```
-
-- Cleanup: when a table or feature is no longer needed, you can remove its associated vectorizer.
-
-- Resource management: if you need to free up resources such as scheduled job slots, you might drop vectorizers that are no longer actively used.
 
 #### Parameters
 
@@ -915,6 +1002,7 @@ Examples:
 |Name| Type | Default | Required | Description |
 |-|------|-|-|-|
 |vectorizer_id| int  | -|✔|The identifier of the vectorizer you want to drop|
+|drop_all| bool | false |✖|true to drop the target table and view as well|
 
 #### Returns
 
@@ -1014,13 +1102,27 @@ Return the number of pending items for the vectorizer with ID 1:
   SELECT ai.vectorizer_queue_pending(1);
   ```
 
+A queue with a very large number of items may be slow to count. The optional 
+`exact_count` parameter is defaulted to false. When false, the count is limited.
+An exact count is returned if the queue has 10,000 or fewer items, and returns
+9223372036854775807 (the max bigint value) if there are greater than 10,000 
+items.
+
+To get an exact count, regardless of queue size, set the optional parameter to
+`true` like this:
+
+  ```sql
+  SELECT ai.vectorizer_queue_pending(1, exact_count=>true);
+  ```
+
 #### Parameters
 
 `ai.vectorizer_queue_pending function` takes the following parameters:
 
-|Name| Type | Default | Required | Description |
-|-|------|-|-|-|
-|vectorizer_id| int  | -|✔|The identifier of the vectorizer you want to check|
+| Name          | Type | Default | Required | Description                                             |
+|---------------|------|---------|----------|---------------------------------------------------------|
+| vectorizer_id | int  | -       | ✔        | The identifier of the vectorizer you want to check      |
+| exact_count   | bool | false   | ✖        | If true, return exact count. If false, capped at 10,000 |
 
 
 ### Returns
@@ -1028,3 +1130,6 @@ Return the number of pending items for the vectorizer with ID 1:
 The number of items in the queue for the specified vectorizer
 
 [timescale-cloud]: https://console.cloud.timescale.com/
+[openai-use-env-var]: https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety#h_a1ab3ba7b2
+[openai-set-key]: https://help.openai.com/en/articles/5112595-best-practices-for-api-key-safety#h_a1ab3ba7b2
+[docker configuration]: https://github.com/timescale/pgai/blob/main/docs/vectorizer-worker.md#install-and-configure-vectorizer-worker

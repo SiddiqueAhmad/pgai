@@ -35,7 +35,7 @@ set search_path to pg_catalog, pg_temp
 -- openai_list_models
 -- list models supported on the openai platform
 -- https://platform.openai.com/docs/api-reference/models/list
-create or replace function ai.openai_list_models(api_key text default null, base_url text default null)
+create or replace function ai.openai_list_models(api_key text default null, api_key_name text default null, base_url text default null)
 returns table
 ( id text
 , created timestamptz
@@ -44,7 +44,9 @@ returns table
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    for tup in ai.openai.list_models(plpy, api_key, base_url):
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    for tup in ai.openai.list_models(plpy, api_key_resolved, base_url):
         yield tup
 $python$
 language plpython3u volatile parallel safe security invoker
@@ -59,6 +61,7 @@ create or replace function ai.openai_embed
 ( model text
 , input_text text
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 , dimensions int default null
 , openai_user text default null
@@ -66,7 +69,9 @@ create or replace function ai.openai_embed
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    for tup in ai.openai.embed(plpy, model, input_text, api_key=api_key, base_url=base_url, dimensions=dimensions, user=openai_user):
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    for tup in ai.openai.embed(plpy, model, input_text, api_key=api_key_resolved, base_url=base_url, dimensions=dimensions, user=openai_user):
         return tup[1]
 $python$
 language plpython3u immutable parallel safe security invoker
@@ -81,6 +86,7 @@ create or replace function ai.openai_embed
 ( model text
 , input_texts text[]
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 , dimensions int default null
 , openai_user text default null
@@ -91,7 +97,9 @@ create or replace function ai.openai_embed
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    for tup in ai.openai.embed(plpy, model, input_texts, api_key=api_key, base_url=base_url, dimensions=dimensions, user=openai_user):
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    for tup in ai.openai.embed(plpy, model, input_texts, api_key=api_key_resolved, base_url=base_url, dimensions=dimensions, user=openai_user):
         yield tup
 $python$
 language plpython3u immutable parallel safe security invoker
@@ -106,6 +114,7 @@ create or replace function ai.openai_embed
 ( model text
 , input_tokens int[]
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 , dimensions int default null
 , openai_user text default null
@@ -113,7 +122,9 @@ create or replace function ai.openai_embed
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    for tup in ai.openai.embed(plpy, model, input_tokens, api_key=api_key, base_url=base_url, dimensions=dimensions, user=openai_user):
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    for tup in ai.openai.embed(plpy, model, input_tokens, api_key=api_key_resolved, base_url=base_url, dimensions=dimensions, user=openai_user):
         return tup[1]
 $python$
 language plpython3u immutable parallel safe security invoker
@@ -128,6 +139,7 @@ create or replace function ai.openai_chat_complete
 ( model text
 , messages jsonb
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 , frequency_penalty float8 default null
 , logit_bias jsonb default null
@@ -148,7 +160,9 @@ create or replace function ai.openai_chat_complete
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    client = ai.openai.make_client(plpy, api_key, base_url)
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    client = ai.openai.make_client(plpy, api_key_resolved, base_url)
     import json
 
     messages_1 = json.loads(messages)
@@ -204,6 +218,7 @@ set search_path to pg_catalog, pg_temp
 create or replace function ai.openai_chat_complete_simple
 ( message text
 , api_key text default null
+, api_key_name text default null
 ) returns text
 as $$
 declare
@@ -214,7 +229,7 @@ begin
         pg_catalog.jsonb_build_object('role', 'system', 'content', 'you are a helpful assistant'),
         pg_catalog.jsonb_build_object('role', 'user', 'content', message)
     );
-    return ai.openai_chat_complete(model, messages, api_key)
+    return ai.openai_chat_complete(model, messages, api_key, api_key_name)
         operator(pg_catalog.->)'choices'
         operator(pg_catalog.->)0
         operator(pg_catalog.->)'message'
@@ -232,12 +247,15 @@ create or replace function ai.openai_moderate
 ( model text
 , input_text text
 , api_key text default null
+, api_key_name text default null
 , base_url text default null
 ) returns jsonb
 as $python$
     #ADD-PYTHON-LIB-DIR
     import ai.openai
-    client = ai.openai.make_client(plpy, api_key, base_url)
+    import ai.secrets
+    api_key_resolved = ai.secrets.get_secret(plpy, api_key, api_key_name, ai.openai.DEFAULT_KEY_NAME, SD)
+    client = ai.openai.make_client(plpy, api_key_resolved, base_url)
     moderation = client.moderations.create(input=input_text, model=model)
     return moderation.model_dump_json()
 $python$

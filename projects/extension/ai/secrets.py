@@ -1,9 +1,12 @@
 import os
+from typing import Optional
 from urllib.parse import urljoin
 
 import backoff
 import httpx
 from backoff._typing import Details
+
+from .utils import get_guc_value
 
 GUC_SECRETS_MANAGER_URL = "ai.external_functions_executor_url"
 GUC_SECRET_ENV_ENABLED = "ai.secret_env_enabled"
@@ -11,15 +14,37 @@ GUC_SECRET_ENV_ENABLED = "ai.secret_env_enabled"
 DEFAULT_SECRETS_MANAGER_PATH = "/api/v1/projects/secrets"
 
 
-def get_guc_value(plpy, setting: str, default: str) -> str:
-    plan = plpy.prepare("select pg_catalog.current_setting($1, true) as val", ["text"])
-    result = plan.execute([setting], 1)
-    val: str | None = None
-    if len(result) != 0:
-        val = result[0]["val"]
-    if val is None:
-        val = default
-    return val
+def _cache_key(secret_name: str) -> str:
+    return f"secret.{secret_name}"
+
+
+def remove_secret_from_cache(sd_cache: dict[str, str], secret_name: str):
+    sd_cache.pop(_cache_key(secret_name), None)
+
+
+def get_secret(
+    plpy,
+    secret: Optional[str],
+    secret_name: Optional[str],
+    secret_name_default: str,
+    sd_cache: Optional[dict[str, str]],
+) -> str:
+    if secret is not None:
+        return secret
+
+    if secret_name is None:
+        secret_name = secret_name_default
+
+    if secret_name is None or secret_name == "":
+        plpy.error("secret_name is required")
+
+    secret = reveal_secret(plpy, secret_name, sd_cache)
+    if secret is None:
+        plpy.error(f"missing {secret_name} secret")
+        # This line should never be reached, but it's here to make the type checker happy.
+        return ""
+
+    return secret
 
 
 def check_secret_permissions(plpy, secret_name: str) -> bool:
@@ -48,7 +73,23 @@ def check_secret_permissions(plpy, secret_name: str) -> bool:
     return len(result) > 0
 
 
-def reveal_secret(plpy, secret_name: str) -> str | None:
+def reveal_secret(
+    plpy, secret_name: str, sd_cache: Optional[dict[str, str]]
+) -> str | None:
+    cache_key = _cache_key(secret_name)
+    if sd_cache is not None:
+        key = sd_cache.get(cache_key, None)
+        if key is not None:
+            return key
+
+    key = _reveal_secret_no_cache(plpy, secret_name)
+    if key is not None and sd_cache is not None:
+        sd_cache[cache_key] = key
+
+    return key
+
+
+def _reveal_secret_no_cache(plpy, secret_name: str) -> str | None:
     # first try the guc, then the secrets manager, then error
     secret_name_lower = secret_name.lower()
     secret = get_guc_value(plpy, f"ai.{secret_name_lower}", "")
@@ -89,8 +130,9 @@ def fetch_secret(plpy, secret_name: str) -> str | None:
     plpy.debug(f"executing secret reveal request to {the_url}")
 
     def on_backoff(detail: Details):
+        wait = detail.get("wait", 0)
         plpy.warning(
-            f"reveal secret '{secret_name}' retry: {detail['tries']} elapsed: {detail['elapsed']} wait: {detail['wait']}..."
+            f"reveal secret '{secret_name}' retry: {detail['tries']} elapsed: {detail['elapsed']} wait: {wait}..."
         )
 
     @backoff.on_exception(

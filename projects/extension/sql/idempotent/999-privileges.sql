@@ -1,10 +1,10 @@
 
 -------------------------------------------------------------------------------
 -- grant_ai_usage
-create or replace function ai.grant_ai_usage(to_user name, admin bool default false) returns void
+create or replace function ai.grant_ai_usage(to_user pg_catalog.name, admin pg_catalog.bool default false) returns void
 as $func$
 declare
-    _sql text;
+    _sql pg_catalog.text;
 begin
     -- schema
     select pg_catalog.format
@@ -26,6 +26,7 @@ begin
             when admin then 'all privileges'
             else
                 case
+                    when k.relname operator(pg_catalog.=) 'semantic_catalog' then 'select'
                     when k.relkind in ('r', 'p') then 'select, insert, update, delete'
                     when k.relkind in ('S') then 'usage, select, update'
                     when k.relkind in ('v') then 'select'
@@ -50,9 +51,9 @@ begin
         and e.extname operator(pg_catalog.=) 'ai'
         and k.relkind in ('r', 'p', 'S', 'v') -- tables, sequences, and views
         and (admin, n.nspname, k.relname) not in
-        (
-            (false, 'ai', 'migration'), -- only admins get any access to this table
-            (false, 'ai', '_secret_permissions') -- only admins get any access to this table
+        ( (false, 'ai', 'migration') -- only admins get any access to this table
+        , (false, 'ai', '_secret_permissions') -- only admins get any access to this table
+        , (false, 'ai', 'feature_flag') -- only admins get any access to this table
         )
         order by n.nspname, k.relname
     )
@@ -86,7 +87,14 @@ begin
         and e.extname operator(pg_catalog.=) 'ai'
         and k.prokind in ('f', 'p')
         and case
-              when k.proname in ('grant_ai_usage', 'grant_secret', 'revoke_secret') then admin -- only admins get these function
+              when k.proname in
+                ( 'grant_ai_usage'
+                , 'grant_secret'
+                , 'revoke_secret'
+                , 'post_restore'
+                , 'initialize_semantic_catalog'
+                )
+              then admin -- only admins get these function
               else true
             end
     )

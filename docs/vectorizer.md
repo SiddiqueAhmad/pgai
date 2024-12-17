@@ -33,7 +33,7 @@ in your database. To quickly try out embeddings using a pre-built Docker develop
 Let's explore how the Vectorizer can transform your approach to unstructured,
 textual, data analysis and semantic search:
 
-- [Setup your API Keys](#setup-your-api-keys)
+- [Select an embedding provider and set up your API Keys](#select-an-embedding-provider-and-set-up-your-api-keys)
 - [Define a vectorizer](#define-a-vectorizer)
 - [Query an embedding](#query-an-embedding)
 - [Inject context into vectorizer chunks](#inject-context-into-vectorizer-chunks)
@@ -43,13 +43,24 @@ textual, data analysis and semantic search:
 - [Monitor a vectorizer](#monitor-a-vectorizer)
 
 
-## Setup your API Keys 
+## Select an embedding provider and set up your API Keys
 
-Before using Vectorizer, you need to setup your API keys for the embedding
-service you are using. To store several API keys, you give each key a name and
-reference them in the `embedding` section of the Vectorizer configuration. The default
-API key names match the embedding provider's default name. For example, for OpenAI, the default 
-key name is `OPENAI_API_KEY`.
+Vectorizer supports the following vector embedding providers:
+- [Ollama](https://ollama.com/)
+- [Voyage AI](https://www.voyageai.com/)
+- [OpenAI](https://openai.com/)
+
+When using an external embedding service, you need to setup your API keys to access
+the service. To store several API keys, you give each key a name and reference them
+in the `embedding` section of the Vectorizer configuration. The default API key
+names match the embedding provider's default name.
+
+The default key names are:
+
+| Provider  | Key name       |
+|-----------|----------------|
+| OpenAI    | OPENAI_API_KEY |
+| Voyage AI | VOYAGE_API_KEY |
 
 Setting up your API keys is done differently depending on whether you are using Vectorizer in
 Timescale Cloud or on a self-hosted Postgres server.
@@ -91,12 +102,17 @@ query like this:
 SELECT ai.create_vectorizer( 
    'blog'::regclass,
     destination => 'blog_contents_embeddings',
-    embedding => ai.embedding_openai('text-embedding-3-small', 768),
+    embedding => ai.embedding_ollama('nomic-embed-text', 768),
     chunking => ai.chunking_recursive_character_text_splitter('contents')
 );
 ```
 
-In this example, if the `contents` field is lengthy, it is split into multiple chunks, 
+This example uses the `ollama-embed-text` embedding model hosted on a local
+Ollama instance. Vectorizer supports other embedding providers, for more details
+consult the [embedding configuration](./vectorizer-api-reference.md#embedding-configuration)
+section of the vectorizer API reference.
+
+Additionally, if the `contents` field is lengthy, it is split into multiple chunks,
 resulting in several embeddings for a single blog post. Chunking helps
 ensure that each embedding is semantically coherent, typically representing a
 single thought or concept. A useful mental model is to think of embedding one
@@ -112,7 +128,7 @@ into each chunk:
 SELECT ai.create_vectorizer(   
     'blog'::regclass,
     destination => 'blog_contents_embeddings',
-    embedding => ai.embedding_openai('text-embedding-3-small', 768),
+    embedding => ai.embedding_ollama('nomic-embed-text', 768),
     chunking => ai.chunking_recursive_character_text_splitter('contents'),
     formatting => ai.formatting_python_template('$title: $chunk')
 );
@@ -134,24 +150,24 @@ as multiple embeddings are usually generated for each source document.
 
 The view includes all columns from the blog table, plus the following additional columns:
 
-| Column | Type | Description |
-|--------|------|-------------|
-| embedding_uuid | UUID | Unique identifier for the embedding |
-| chunk | TEXT | The text segment that was embedded |
-| embedding | VECTOR | The vector representation of the chunk |
-| chunk_seq | INT | Sequence number of the chunk within the document, starting at 0 |
+| Column         | Type   | Description                                                     |
+|----------------|--------|-----------------------------------------------------------------|
+| embedding_uuid | UUID   | Unique identifier for the embedding                             |
+| chunk          | TEXT   | The text segment that was embedded                              |
+| embedding      | VECTOR | The vector representation of the chunk                          |
+| chunk_seq      | INT    | Sequence number of the chunk within the document, starting at 0 |
 
 To find the closest embeddings to a query, use this canonical SQL query:
 
 ```sql
 SELECT 
    chunk,
-   embedding <=> ai.openai_embed('text-embedding-3-small', <query>) as distance
+   embedding <=> ai.ollama_embed('nomic-embed-text', <query>) as distance
 FROM blog_contents_embeddings
 ORDER BY distance
 LIMIT 10;
 ```
-The `openai_embed` function generates an embedding for the provided string. The
+The `ollama_embed` function generates an embedding for the provided string. The
 `<=>` operator calculates the distance between the query embedding and each
 row's embedding vector. This is a simple way to do semantic search.
 
@@ -200,7 +216,7 @@ accordingly:
 SELECT ai.create_vectorizer(
     'blog'::regclass,
     destination => 'blog_contents_embeddings',
-    embedding => ai.embedding_openai('text-embedding-3-small', 768),
+    embedding => ai.embedding_ollama('nomic-embed-text', 768),
     chunking => ai.chunking_recursive_character_text_splitter('contents', chunk_size => 700),
     formatting => ai.formatting_python_template('$title - by $author - $chunk')
 );
@@ -220,7 +236,7 @@ example uses a HNSW index:
 SELECT ai.create_vectorizer(
     'blog'::regclass,
     destination => 'blog_contents_embeddings',
-    embedding => ai.embedding_openai('text-embedding-3-small', 768),
+    embedding => ai.embedding_ollama('nomic-embed-text', 768),
     chunking => ai.chunking_recursive_character_text_splitter('contents', chunk_size => 700),
     formatting => ai.formatting_python_template('$title - by $author - $chunk'),
     indexing => ai.indexing_hnsw(min_rows => 100000, opclass => 'vector_l2_ops')
@@ -272,8 +288,8 @@ SELECT * FROM ai.vectorizer_status;
 
 Sample output:
 
-| id | source_table | target_table | view | pending_items |
-|----|--------------|--------------|------|---------------|
-| 1 | public.blog | public.blog_contents_embedding_store | public.blog_contents_embeddings | 1 |
+| id | source_table | target_table                         | view                            | pending_items |
+|----|--------------|--------------------------------------|---------------------------------|---------------|
+| 1  | public.blog  | public.blog_contents_embedding_store | public.blog_contents_embeddings | 1             |
 
 The `pending_items` column indicates the number of items still awaiting embedding creation.

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import hashlib
+import platform
 import re
 import os
 import shutil
@@ -18,6 +20,7 @@ HELP = """Available targets:
 - uninstall        uninstalls the project
 - uninstall-sql    removes the sql extension from the postgres installation
 - uninstall-py     removes the extension's python package from the system
+- freeze           updates frozen.txt with hashes of incremental sql files
 - build            alias for build-sql
 - build-sql        constructs the sql files for the extension
 - clean            removes python build artifacts from the src dir
@@ -37,13 +40,17 @@ HELP = """Available targets:
 
 
 def versions() -> list[str]:
+    # ADD NEW VERSIONS TO THE FRONT OF THIS LIST! STAY SORTED PLEASE
     return [
-        "0.4.1",
-        "0.4.0",
-        "0.3.0",
-        "0.2.0",
-        "0.1.0",
-    ]  # ADD NEW VERSIONS TO THE FRONT OF THIS LIST! STAY SORTED PLEASE
+        "0.6.1-dev",
+        "0.6.0",  # released
+        "0.5.0",  # released
+        "0.4.1",  # released
+        "0.4.0",  # released
+        "0.3.0",  # deprecated
+        "0.2.0",  # deprecated
+        "0.1.0",  # deprecated
+    ]
 
 
 def this_version() -> str:
@@ -54,14 +61,40 @@ def prior_versions() -> list[str]:
     return versions()[1:] if len(versions()) > 1 else []
 
 
+def deprecated_versions() -> set[str]:
+    return {
+        "0.3.0",  # deprecated
+        "0.2.0",  # deprecated
+        "0.1.0",  # deprecated
+    }
+
+
+def fatal(msg: str) -> None:
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def check_versions():
+    # double-hyphens will cause issues. disallow
+    pattern = r"\d+\.\d+\.\d+(-[a-z0-9.]+)?"
+    for version in versions():
+        if re.fullmatch(pattern, version) is None:
+            fatal(f"version {version} does not match the pattern {pattern}")
+
+
 def parse_version(version: str) -> tuple[int, int, int, str | None]:
-    parts = re.split(r"[.-]", version, 4)
+    parts = re.split(r"[.-]", version, maxsplit=4)
     return (
         int(parts[0]),
         int(parts[1]),
         int(parts[2]),
         parts[3] if len(parts) > 3 else None,
     )
+
+
+def is_prerelease(version: str) -> bool:
+    parts = parse_version(version)
+    return parts[3] is not None
 
 
 def git_tag(version: str) -> str:
@@ -90,19 +123,6 @@ def idempotent_sql_files() -> list[Path]:
     return paths
 
 
-def check_idempotent_sql_files(paths: list[Path]) -> None:
-    prev = 0
-    for path in paths:
-        this = int(path.name[0:3])
-        if this != 999 and this != prev + 1:
-            print(
-                f"idempotent sql files must be strictly ordered. this: {this} prev: {prev}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        prev = this
-
-
 def incremental_sql_dir() -> Path:
     return sql_dir() / "incremental"
 
@@ -113,17 +133,102 @@ def incremental_sql_files() -> list[Path]:
     return paths
 
 
-def check_incremental_sql_files(paths: list[Path]) -> None:
+def hash_file(path: Path) -> str:
+    sha256 = hashlib.sha256()
+    sha256.update(path.read_bytes())
+    return sha256.hexdigest()
+
+
+def frozen_file() -> Path:
+    return incremental_sql_dir() / "frozen.txt"
+
+
+def freeze() -> None:
+    lines: list[str] = []
+    for file in incremental_sql_files():
+        if sql_file_number(file) >= 900:
+            break
+        lines.append(f"{hash_file(file)} {file.name}")
+    frozen_file().write_text("\n".join(lines))
+
+
+def read_frozen_file() -> dict[str, str]:
+    frozen: dict[str, str] = dict()
+    with frozen_file().open(mode="rt", encoding="utf-8") as r:
+        for line in r.readlines():
+            if line.strip() == "":
+                continue
+            parts = line.split(" ")
+            # map file name to hash
+            frozen[parts[1]] = parts[0]
+    return frozen
+
+
+def parse_feature_flag(path: Path) -> str | None:
+    with path.open(mode="rt", encoding="utf-8") as f:
+        line = f.readline()
+        if not line.startswith("--FEATURE-FLAG: "):
+            return None
+        ff = line.removeprefix("--FEATURE-FLAG: ").strip()
+        pattern = r"^[a-z_]+$"
+        if re.fullmatch(pattern, ff) is None:
+            fatal(
+                f"feature flag {ff} in {path.name} does not match the pattern {pattern}"
+            )
+        return ff
+
+
+def sql_file_number(path: Path) -> int:
+    pattern = r"^(\d{3})-[a-z][a-z_-]*\.sql$"
+    match = re.match(pattern, path.name)
+    if not match:
+        fatal(f"{path} file name does not match the pattern {pattern}")
+    return int(match.group(1))
+
+
+def check_sql_file_order(path: Path, prev: int) -> int:
+    kind = path.parent.name
+    this = sql_file_number(path)
+    # ensuring file number correlation
+    if this < 900 and this != prev + 1:
+        fatal(f"{kind} sql files must be strictly ordered. this: {this} prev: {prev}")
+    # avoiding file number duplication
+    if this >= 900 and this == prev:  # allow gaps in pre-production scripts
+        fatal(
+            f"{kind} sql files must not have duplicate numbers. this: {this} prev: {prev}"
+        )
+    ff = parse_feature_flag(path)
+    # feature flagged files should be between 900 and 999
+    if this < 900 and ff:
+        fatal(
+            f"{kind} sql files under 900 must be NOT gated by a feature flag: {path.name}"
+        )
+    # only feature flagged files go over 899
+    if this >= 900 and not ff:
+        fatal(f"{kind} sql files over 899 must be gated by a feature flag: {path.name}")
+    return this
+
+
+def check_idempotent_sql_files(paths: list[Path]) -> None:
+    # paths are sorted
     prev = 0
     for path in paths:
-        this = int(path.name[0:3])
-        if this != prev + 1:
-            print(
-                f"incremental sql files must be strictly ordered. this: {this} prev: {prev}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        prev = this
+        if path.name == "999-privileges.sql":
+            break
+        prev = check_sql_file_order(path, prev)
+
+
+def check_incremental_sql_files(paths: list[Path]) -> None:
+    # paths are sorted
+    frozen = read_frozen_file()
+    prev = 0
+    for path in paths:
+        prev = check_sql_file_order(path, prev)
+        if path.name in frozen:
+            if hash_file(path) != frozen[path.name]:
+                fatal(
+                    f"changing frozen incremental sql file {path.name} is not allowed"
+                )
 
 
 def output_sql_file() -> Path:
@@ -145,19 +250,31 @@ def build_control_file() -> None:
     control_file().write_text("".join(lines))
 
 
-def sql_migration_file() -> Path:
-    return sql_dir() / "migration.sql"
+def feature_flag_to_guc(feature_flag: str) -> str:
+    return f"ai.enable_feature_flag_{feature_flag}"
+
+
+def gate_sql(code: str, feature_flag: str) -> str:
+    template = sql_dir().joinpath("gated.sql").read_text()
+    guc = feature_flag_to_guc(feature_flag)
+    return template.format(code=code, guc=guc, feature_flag=feature_flag)
 
 
 def build_incremental_sql_file(input_file: Path) -> str:
-    template = sql_migration_file().read_text()
+    template = sql_dir().joinpath("migration.sql").read_text()
     migration_name = input_file.name
     migration_body = input_file.read_text()
     version = this_version()
     migration_body = migration_body.replace("@extversion@", version)
-    return template.format(
-        migration_name=migration_name, migration_body=migration_body, version=version
+    code = template.format(
+        migration_name=migration_name,
+        migration_body=migration_body,
+        version=version,
     )
+    feature_flag = parse_feature_flag(input_file)
+    if feature_flag:
+        code = gate_sql(code, feature_flag)
+    return code
 
 
 def build_idempotent_sql_file(input_file: Path) -> str:
@@ -166,6 +283,13 @@ def build_idempotent_sql_file(input_file: Path) -> str:
         r = plpy.execute("select coalesce(pg_catalog.current_setting('ai.python_lib_dir', true), '{python_install_dir()}') as python_lib_dir")
         python_lib_dir = r[0]["python_lib_dir"]
         from pathlib import Path
+        import sys
+        import sysconfig
+        # Note: the "old" (pre-0.4.0) packages are installed as system-level python packages
+        # and take precedence over our extension-version specific packages.
+        # By removing the whole thing from the path we won't run into package conflicts.
+        if "purelib" in sysconfig.get_path_names() and sysconfig.get_path("purelib") in sys.path:
+            sys.path.remove(sysconfig.get_path("purelib"))
         python_lib_dir = Path(python_lib_dir).joinpath("{this_version()}")
         import site
         site.addsitedir(str(python_lib_dir))
@@ -181,44 +305,73 @@ def build_idempotent_sql_file(input_file: Path) -> str:
     inject = "".join(inject.splitlines(keepends=True)[1:-1])
     code = input_file.read_text()
     code = code.replace("@extversion@", this_version())
-    return code.replace(
+    code = code.replace(
         """    #ADD-PYTHON-LIB-DIR\n""", inject
     )  # leading 4 spaces is intentional
+    feature_flag = parse_feature_flag(input_file)
+    if feature_flag:
+        code = gate_sql(code, feature_flag)
+    return code
 
 
-def sql_head_file() -> Path:
-    return sql_dir() / "head.sql"
+def build_feature_flags() -> str:
+    feature_flags = set()
+    for path in incremental_sql_files():
+        ff = parse_feature_flag(path)
+        if ff:
+            feature_flags.add(ff)
+    for path in idempotent_sql_files():
+        ff = parse_feature_flag(path)
+        if ff:
+            feature_flags.add(ff)
+    template = sql_dir().joinpath("flag.sql").read_text()
+    output = ""
+    for feature_flag in feature_flags:
+        guc = feature_flag_to_guc(feature_flag)
+        output += template.format(
+            feature_flag=feature_flag, guc=guc, version=this_version()
+        )
+    return output
 
 
 def build_sql() -> None:
+    check_versions()
+    check_incremental_sql_files(incremental_sql_files())
+    check_idempotent_sql_files(idempotent_sql_files())
     build_control_file()
-    hr = "".rjust(80, "-")
+    hr = "".rjust(80, "-")  # "horizontal rule"
     osf = output_sql_file()
     osf.unlink(missing_ok=True)
     with osf.open("w") as wf:
-        wf.write(f"{hr}\n-- {this_version()}\n\n\n")
-        wf.write(sql_head_file().read_text())
-        wf.write("\n\n\n")
-        files = incremental_sql_files()
-        check_incremental_sql_files(files)
-        for inc_file in files:
+        wf.write(f"{hr}\n-- ai {this_version()}\n\n")
+        wf.write(sql_dir().joinpath("head.sql").read_text())
+        if is_prerelease(this_version()):
+            wf.write("\n\n")
+            wf.write(build_feature_flags())
+        wf.write("\n\n")
+        for inc_file in incremental_sql_files():
+            if sql_file_number(inc_file) >= 900 and not is_prerelease(this_version()):
+                # don't include pre-release code in non-prerelease versions
+                continue
             code = build_incremental_sql_file(inc_file)
             wf.write(code)
-            wf.write("\n\n\n")
-        files = idempotent_sql_files()
-        check_idempotent_sql_files(files)
-        for idm_file in files:
+            wf.write("\n\n")
+        for idm_file in idempotent_sql_files():
+            nbr = sql_file_number(idm_file)
+            if nbr != 999 and nbr >= 900 and not is_prerelease(this_version()):
+                # don't include pre-release code in non-prerelease versions
+                continue
             wf.write(f"{hr}\n-- {idm_file.name}\n")
             wf.write(build_idempotent_sql_file(idm_file))
-            wf.write("\n\n\n")
+            wf.write("\n\n")
         wf.flush()
         wf.close()
     for prior_version in prior_versions():
-        if prior_version in {
-            "0.3.0",
-            "0.2.0",
-            "0.1.0",
-        }:  # we don't allow upgrades from these versions
+        if prior_version in deprecated_versions():
+            # we don't allow upgrades from these versions. they are deprecated
+            continue
+        if is_prerelease(prior_version):
+            # we don't allow upgrades from prerelease versions
             continue
         dest = sql_dir().joinpath(f"ai--{prior_version}--{this_version()}.sql")
         dest.unlink(missing_ok=True)
@@ -233,7 +386,7 @@ def clean_sql() -> None:
 
 def postgres_bin_dir() -> Path:
     bin_dir = os.getenv("PG_BIN")
-    if bin_dir:
+    if bin_dir is not None and Path(bin_dir).is_dir():
         return Path(bin_dir).resolve()
     else:
         bin_dir = Path(f"/usr/lib/postgresql/{pg_major()}/bin")
@@ -242,8 +395,7 @@ def postgres_bin_dir() -> Path:
         else:
             p = shutil.which("pg_config")
             if not p:
-                print("pg_config not found", file=sys.stderr)
-                sys.exit(1)
+                fatal("pg_config not found")
             return Path(p).parent.resolve()
 
 
@@ -266,15 +418,12 @@ def extension_install_dir() -> Path:
 def install_sql() -> None:
     ext_dir = extension_install_dir()
     if not ext_dir.is_dir():
-        print(f"extension directory does not exist: {ext_dir}", file=sys.stderr)
-        sys.exit(1)
+        fatal(f"extension directory does not exist: {ext_dir}")
     this_sql_file = output_sql_file()
     if not this_sql_file.is_file():
-        print(f"required sql file is missing: {this_sql_file}", file=sys.stderr)
-        sys.exit(1)
+        fatal(f"required sql file is missing: {this_sql_file}")
     if not control_file().is_file():
-        print(f"required control file is missing: {control_file()}", file=sys.stderr)
-        sys.exit(1)
+        fatal(f"required control file is missing: {control_file()}")
     for src in sql_dir().glob("ai*.control"):
         dest = ext_dir / src.name
         shutil.copyfile(src, dest)
@@ -309,9 +458,13 @@ def install_old_py_deps() -> None:
     old_reqs_file = ext_dir().joinpath("old_requirements.txt").resolve()
     if old_reqs_file.is_file():
         env = {k: v for k, v in os.environ.items()}
-        env["PIP_BREAK_SYSTEM_PACKAGES"] = "1"
+        cmd = (
+            f"pip3 install -v --compile --break-system-packages -r {old_reqs_file}"
+            if shutil.which("uv") is None
+            else f"uv pip install -v --compile --system --break-system-packages -r {old_reqs_file}"
+        )
         subprocess.run(
-            f"pip3 install -v --compile -r {old_reqs_file}",
+            cmd,
             shell=True,
             check=True,
             env=env,
@@ -322,18 +475,11 @@ def install_old_py_deps() -> None:
 def install_prior_py() -> None:
     install_old_py_deps()
     for version in prior_versions():
-        if version in {
-            "0.3.0",
-            "0.2.0",
-            "0.1.0",
-        }:  # these are handled by install_old_py_deps()
+        if version in deprecated_versions():
+            # these are handled by install_old_py_deps()
             continue
         if os.sep in version:
-            print(
-                f"'{os.sep}' in version {version}. this is not supported",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            fatal(f"'{os.sep}' in version {version}. this is not supported")
         version_target_dir = python_install_dir().joinpath(version)
         if version_target_dir.exists():
             continue
@@ -347,8 +493,10 @@ def install_prior_py() -> None:
             env=os.environ,
         )
         tmp_src_dir = tmp_dir.joinpath("projects", "extension").resolve()
+        bin = "pip3" if shutil.which("uv") is None else "uv pip"
+        cmd = f'{bin} install -v --compile --target "{version_target_dir}" "{tmp_src_dir}"'
         subprocess.run(
-            f'pip3 install -v --compile -t "{version_target_dir}" "{tmp_src_dir}"',
+            cmd,
             check=True,
             shell=True,
             env=os.environ,
@@ -389,8 +537,10 @@ def install_py() -> None:
             "pgai-*.dist-info"
         ):  # delete package info if exists
             shutil.rmtree(d)
+        bin = "pip3" if shutil.which("uv") is None else "uv pip"
+        cmd = f'{bin} install -v --no-deps --compile --target "{version_target_dir}" "{ext_dir()}"'
         subprocess.run(
-            f'pip3 install -v --no-deps --compile -t "{version_target_dir}" "{ext_dir()}"',
+            cmd,
             check=True,
             shell=True,
             env=os.environ,
@@ -398,8 +548,12 @@ def install_py() -> None:
         )
     else:
         version_target_dir.mkdir(exist_ok=True)
+        bin = "pip3" if shutil.which("uv") is None else "uv pip"
+        cmd = (
+            f'{bin} install -v --compile --target "{version_target_dir}" "{ext_dir()}"'
+        )
         subprocess.run(
-            f'pip3 install -v --compile -t "{version_target_dir}" "{ext_dir()}"',
+            cmd,
             check=True,
             shell=True,
             env=os.environ,
@@ -457,7 +611,13 @@ def where_am_i() -> str:
 
 def test_server() -> None:
     if where_am_i() == "host":
-        cmd = "docker exec -it -w /pgai/tests/vectorizer pgai-ext fastapi dev server.py"
+        cmd = """docker exec \
+            -e OPENAI_API_KEY=${OPENAI_API_KEY} \
+            -e ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY} \
+            -e COHERE_API_KEY=${COHERE_API_KEY} \
+            -e VOYAGE_API_KEY=${VOYAGE_API_KEY} \
+            -it -w /pgai/tests/vectorizer pgai-ext fastapi dev server.py
+            """
         subprocess.run(cmd, shell=True, check=True, env=os.environ, cwd=ext_dir())
     else:
         cmd = "fastapi dev server.py"
@@ -479,7 +639,7 @@ def lint_sql() -> None:
     cmd = " ".join(
         [
             "pgspot --ignore-lang=plpython3u",
-            '--proc-without-search-path "ai._vectorizer_job(job_id integer,config jsonb)"',
+            '--proc-without-search-path "ai._vectorizer_job(job_id integer,config pg_catalog.jsonb)"',
             f"{sql}",
         ]
     )
@@ -492,7 +652,7 @@ def lint_py() -> None:
 
 def lint() -> None:
     lint_py()
-    lint_sql()
+    # lint_sql()  # TODO: enable this when pgspot is fixed
 
 
 def format_py() -> None:
@@ -513,10 +673,13 @@ def docker_build() -> None:
 
 
 def docker_run() -> None:
-    # Set TESTCONTAINERS_HOST_OVERRIDE when running on MacOS.
+    networking = (
+        "--network host" if platform.system() == "Linux" else "-p 127.0.0.1:5432:5432"
+    )
     cmd = " ".join(
         [
-            "docker run -d --name pgai-ext -p 127.0.0.1:5432:5432 -e POSTGRES_HOST_AUTH_METHOD=trust",
+            "docker run -d --name pgai-ext --hostname pgai-ext -e POSTGRES_HOST_AUTH_METHOD=trust",
+            networking,
             f"--mount type=bind,src={ext_dir()},dst=/pgai",
             "-e TEST_ENV_SECRET=super_secret",
             "pgai-ext",
@@ -571,6 +734,8 @@ if __name__ == "__main__":
             install_py()
         elif action == "install-sql":
             install_sql()
+        elif action == "freeze":
+            freeze()
         elif action == "build-sql":
             build_sql()
         elif action == "clean-sql":
