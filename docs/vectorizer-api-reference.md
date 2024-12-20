@@ -127,18 +127,18 @@ in other management functions.
 | Name             | Type                                                   | Default                           | Required | Description                                                                                        |
 |------------------|--------------------------------------------------------|-----------------------------------|----------|----------------------------------------------------------------------------------------------------|
 | source           | regclass                                               | -                                 | ✔        | The source table that embeddings are generated for.                                                |
-| destination      | name                                                   | -                                 | ✖        | A name for the table the embeddings are stored in.                                                 |
+| destination      | name                                                   | -                                 | ✖        | Set the name of the table embeddings are stored in, and the view with both the original data and the embeddings.<br>The view is named `<destination>`, the embedding table is named `<destination>_store`.<br>You set destination to avoid naming conflicts when you configure additional vectorizers for a source table.                              |
 | embedding        | [Embedding configuration](#embedding-configuration)    | -                                 | ✔        | Set how to embed the data.                                                                         |
 | chunking         | [Chunking configuration](#chunking-configuration)      | -                                 | ✔        | Set the way to split text data, using functions like `ai.chunking_character_text_splitter()`.      |
 | indexing         | [Indexing configuration](#indexing-configuration)      | `ai.indexing_default()`           | ✖        | Specify how to index the embeddings. For example, `ai.indexing_diskann()` or `ai.indexing_hnsw()`. |
 | formatting       | [Formatting configuration](#formatting-configuration)  | `ai.formatting_python_template()` | ✖        | Define the data format before embedding, using `ai.formatting_python_template()`.                  |
 | scheduling       | [Scheduling configuration](#scheduling-configuration)  | `ai.scheduling_default()`         | ✖        | Set how often to run the vectorizer. For example, `ai.scheduling_timescaledb()`.                   |
 | processing       | [Processing configuration](#processing-configuration ) | `ai.processing_default()`         | ✖        | Configure the way to process the embeddings.                                                       |
-| target_schema    | name                                                   | -                                 | ✖        | Specify the schema where the embeddings will be stored.                                            |
+| target_schema    | name                                                   | -                                 | ✖        | Specify the schema where the embeddings will be stored. This argument takes precedence over `destination`.                                     |
 | target_table     | name                                                   | -                                 | ✖        | Specify name of the table where the embeddings will be stored.                                     |
 | view_schema      | name                                                   | -                                 | ✖        | Specify the schema where the view is created.                                                      |
-| view_name        | name                                                   | -                                 | ✖        | Specify the name of the view to be created.                                                        |
-| queue_schema     | name                                                   | -                                 | ✖        | Specify the schema where the work queue table is created..                                         |
+| view_name        | name                                                   | -                                 | ✖        | Specify the name of the view to be created. This argument takes precedence over `destination`.                                     |
+| queue_schema     | name                                                   | -                                 | ✖        | Specify the schema where the work queue table is created.                                         |
 | queue_table      | name                                                   | -                                 | ✖        | Specify the name of the work queue table.                                                          |
 | grant_to         | [Grant To configuration][#grant-to-configuration]      | `ai.grant_to_default()`           | ✖        | Specify which users should be able to use objects created by the vectorizer.                       |
 | enqueue_existing | bool                                                   | `true`                            | ✖        | Set to `true` if existing rows should be immediately queued for embedding.                         |
@@ -602,7 +602,7 @@ HNSW is suitable for in-memory datasets and scenarios where query speed is cruci
 ```sql
   SELECT ai.create_vectorizer(
       'blog_posts'::regclass,
-      indexing => ai.indexing_hnsw(min_rows => 50000, opclass => 'vector_l2_ops'),
+      indexing => ai.indexing_hnsw(min_rows => 50000, opclass => 'vector_l1_ops'),
       -- other parameters...
   );
 ```
@@ -614,10 +614,10 @@ HNSW is suitable for in-memory datasets and scenarios where query speed is cruci
 | Name | Type | Default             | Required | Description                                                                                                    |
 |------|------|---------------------|-|----------------------------------------------------------------------------------------------------------------|
 |min_rows| int  | 100000              |✖| The minimum number of rows before creating the index                                                           |
-|opclass| text  | `vector_cosine_ops` |✖| The operator class for the index. Possible values are:`vector_cosine_ops`, `vector_l2_ops`, or `vector_ip_ops` |
+|opclass| text  | `vector_cosine_ops` |✖| The operator class for the index. Possible values are:`vector_cosine_ops`, `vector_l1_ops`, or `vector_ip_ops` |
 |m| int  | -                   |✖| Advanced [HNSW parameters](https://en.wikipedia.org/wiki/Hierarchical_navigable_small_world)                   |
-|ef_construction| int  | -                   |✖|  Advanced [HNSW parameters](https://en.wikipedia.org/wiki/Hierarchical_navigable_small_world)                                                                                                              |
-| create_when_queue_empty| boolean | true |✖| Create the index only after all of the embeddings have been generated. |
+|ef_construction| int  | -                   |✖| Advanced [HNSW parameters](https://en.wikipedia.org/wiki/Hierarchical_navigable_small_world)                   |
+| create_when_queue_empty| boolean | true |✖| Create the index only after all of the embeddings have been generated.                                         |
 
 
 #### Returns
